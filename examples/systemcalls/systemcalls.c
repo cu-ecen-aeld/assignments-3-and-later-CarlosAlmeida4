@@ -16,8 +16,14 @@ bool do_system(const char *cmd)
  *   and return a boolean true if the system() call completed with success
  *   or false() if it returned a failure
 */
-
-    return true;
+    if(system(cmd)!= -1)
+    {
+        return true;
+    }
+    else
+    {
+        return false;
+    }
 }
 
 /**
@@ -45,9 +51,7 @@ bool do_exec(int count, ...)
         command[i] = va_arg(args, char *);
     }
     command[count] = NULL;
-    // this line is to avoid a compile warning before your implementation is complete
-    // and may be removed
-    command[count] = command[count];
+    
 
 /*
  * TODO:
@@ -58,10 +62,28 @@ bool do_exec(int count, ...)
  *   as second argument to the execv() command.
  *
 */
-
+    pid_t pid = fork();
+    switch (pid)
+    {
+    case -1:
+        break;
+    case 0:
+        //Child Process
+        execv(command[0],command);
+        exit(EXIT_FAILURE);
+        break;
+    default:
+        //Parent Process
+        int status;
+        if(wait(&status)<0) break; //Error value from wait
+        if(WIFEXITED(status) && WEXITSTATUS(status) == 0) 
+        {
+            return true;
+        }
+    }
     va_end(args);
 
-    return true;
+    return false;
 }
 
 /**
@@ -93,6 +115,33 @@ bool do_exec_redirect(const char *outputfile, int count, ...)
  *
 */
 
+    int status;
+    int fd = open(outputfile,O_WRONLY|O_TRUNC|O_CREAT,0644);
+    
+    pid_t pid = fork();
+    switch (pid)
+    {
+    case -1:
+        return false;
+    case 0:
+        //Child Process
+        if(dup2(fd,1)<0)
+        {
+            perror("dup2");
+            abort();
+        }
+        execv(command[0],command);
+        exit(EXIT_FAILURE);
+        return false;
+    default:
+        //Parent Process
+        if(wait(&status)<0) return false; //Error value from wait
+        if(WIFEXITED(status) && WEXITSTATUS(status) == 0) 
+        {
+            return true;
+        }
+    }
+    close(fd);
     va_end(args);
 
     return true;
