@@ -1,3 +1,5 @@
+CC := $(CROSS_COMPILE) gcc
+
 default: writer
 
 writer: writer.c 
