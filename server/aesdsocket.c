@@ -11,7 +11,7 @@
 #include <signal.h>
 #include <errno.h>
 
-int exitFlag = 0;
+volatile int exitFlag = 0;
 
 void signal_handler(int signal)
 {
@@ -19,9 +19,9 @@ void signal_handler(int signal)
     exitFlag = 1;
 }
 
-int main()
+int main(int argc, char * argv[])
 {
-    int server_fd, clientSocket, rc;
+    int server_fd, clientSocket, rc, daemonMode = 0;
     const char PORT[] = "9000";
     int getAddrInfoRes;
     struct addrinfo *servinfo;
@@ -41,6 +41,10 @@ int main()
     sigaction(SIGINT, &sa, NULL);
     sigaction(SIGTERM, &sa, NULL);
     
+    if(argc == 2 && strcmp(argv[1],"-d") == 0)
+    {
+        daemonMode = 1;
+    }
 
     const char *filename = "/var/tmp/aesdsocketdata";
     remove(filename);
@@ -76,6 +80,21 @@ int main()
         exit(EXIT_FAILURE);
     }
 
+    if(daemonMode)
+    {
+        pid_t p = fork();
+        if(p<0)
+        {
+            syslog(LOG_ERR, "Failed to fork the program");
+            exit(EXIT_FAILURE);
+        }
+        else
+        {
+            exit(EXIT_SUCCESS);
+        }
+        setsid();
+    }
+
     if (listen(server_fd, 10) < 0)
     {
         syslog(LOG_ERR, "unable to listen");
@@ -92,6 +111,8 @@ int main()
         if (clientSocket < 0)
         {
             syslog(LOG_ERR, "Failed to accept client with errno %d\n", errno);
+            close(clientSocket);
+            close(server_fd);
             exit(EXIT_FAILURE);
         }
         else
@@ -100,7 +121,7 @@ int main()
 
         syslog(LOG_INFO, "Accepted connection from %s", inet_ntoa(clientAddr.sin_addr));
         WaitForClient = 1;
-
+        char *tmp = NULL;
         while (WaitForClient)
         {
 
@@ -113,16 +134,18 @@ int main()
             {
                 receiveBuff[receiveSize] = '\0';
                 // printf("bufsize %d Received: %s\n",WritetoFileBufSize, receiveBuff);
-                int newSize = receiveSize + WritetoFileBufSize;
-                char *tmp = (char *)realloc(WritetoFileBuf, newSize);
+                int newSize = receiveSize + WritetoFileBufSize +1;
+                tmp = (char *)realloc(WritetoFileBuf, newSize);
 
                 if (tmp == NULL)
                 {
-                    syslog(LOG_ERR, "Failed allocating memory\n Package discarded");
+                    syslog(LOG_ERR, "Failed allocating memory Package size: %d", receiveSize);
+                    syslog(LOG_ERR, "Current buffer size: %d", WritetoFileBufSize);
+                    
                     break;
                 }
                 WritetoFileBuf = tmp;
-                //free(tmp);
+
                 if (WritetoFileBufSize == 0)
                 {
                     WritetoFileBuf[0] = '\0';
@@ -142,17 +165,27 @@ int main()
         if (file == NULL)
         {
             syslog(LOG_ERR, "Failed to open the file %s", filename);
+            //free(WritetoFileBuf);
+            fclose(file);
+            close(clientSocket);
+            close(server_fd);
             exit(EXIT_FAILURE);
         }
         if (fwrite(WritetoFileBuf, 1, WritetoFileBufSize, file) != WritetoFileBufSize)
         {
             syslog(LOG_ERR, "Failed to write entire buffer to file");
+            //free(WritetoFileBuf);
+            fclose(file);
+            close(clientSocket);
+            close(server_fd);
             exit(EXIT_FAILURE);
         }
         // printf("WritetoFileBuf = %s",WritetoFileBuf);
 
         if (WritetoFileBuf != NULL)
         {
+            //WritetoFileBuf = NULL;
+            free(WritetoFileBuf);
             WritetoFileBuf = NULL;
             WritetoFileBufSize = 0;
         }
