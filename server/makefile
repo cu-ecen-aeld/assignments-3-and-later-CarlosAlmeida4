@@ -1,15 +1,15 @@
 CC := $(CROSS_COMPILE) gcc
-
+CFLAGS=-Wall -Werror -O0
 all: aesdsocket
 
 default: aesdsocket
 
 debug: aesdsocket.c 
-	$(CC) -g -O0 aesdsocket.c -o aesdsocket
+	$(CC) $(CFLAGS) aesdsocket.c -o aesdsocket
 
 
 aesdsocket: aesdsocket.c 
-	$(CC) aesdsocket.c -o aesdsocket
+	$(CC) $(CFLAGS) aesdsocket.c -o aesdsocket
 
 
 clean: 

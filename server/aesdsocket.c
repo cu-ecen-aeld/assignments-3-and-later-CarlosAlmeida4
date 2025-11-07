@@ -88,7 +88,7 @@ int main(int argc, char * argv[])
             syslog(LOG_ERR, "Failed to fork the program");
             exit(EXIT_FAILURE);
         }
-        else
+        if(p>0)
         {
             exit(EXIT_SUCCESS);
         }
@@ -103,7 +103,7 @@ int main(int argc, char * argv[])
 
     freeaddrinfo(servinfo);
 
-    while (!exitFlag)
+    do
     {
 
         clientSocket = accept(server_fd, (struct sockaddr *)&clientAddr, &clientSize);
@@ -111,7 +111,6 @@ int main(int argc, char * argv[])
         if (clientSocket < 0)
         {
             syslog(LOG_ERR, "Failed to accept client with errno %d\n", errno);
-            close(clientSocket);
             close(server_fd);
             exit(EXIT_FAILURE);
         }
@@ -122,7 +121,7 @@ int main(int argc, char * argv[])
         syslog(LOG_INFO, "Accepted connection from %s", inet_ntoa(clientAddr.sin_addr));
         WaitForClient = 1;
         char *tmp = NULL;
-        while (WaitForClient)
+        do
         {
 
             int receiveSize = recv(clientSocket, &receiveBuff, (sizeof(receiveBuff) - 1), 0);
@@ -159,14 +158,12 @@ int main(int argc, char * argv[])
             {
                 WaitForClient = 0;
             }
-        }
+        }while (WaitForClient);
 
         FILE *file = fopen(filename, "a+");
         if (file == NULL)
         {
             syslog(LOG_ERR, "Failed to open the file %s", filename);
-            //free(WritetoFileBuf);
-            fclose(file);
             close(clientSocket);
             close(server_fd);
             exit(EXIT_FAILURE);
@@ -180,7 +177,7 @@ int main(int argc, char * argv[])
             close(server_fd);
             exit(EXIT_FAILURE);
         }
-        // printf("WritetoFileBuf = %s",WritetoFileBuf);
+        fflush(file);
 
         if (WritetoFileBuf != NULL)
         {
@@ -195,14 +192,14 @@ int main(int argc, char * argv[])
         while (fgets(receiveBuff, 2048, file))
         {
             // send the buffer to the client
-            send(clientSocket, &receiveBuff, strlen(receiveBuff), 0);
+            send(clientSocket, receiveBuff, strlen(receiveBuff), 0);
             // printf("%s",receiveBuff);
         }
         fclose(file);
         close(clientSocket);
 
         syslog(LOG_INFO, "Closed connection from %s", inet_ntoa(clientAddr.sin_addr));
-    }
+    }while (!exitFlag);
 
     if(remove(filename) == 0)
     {
@@ -214,7 +211,7 @@ int main(int argc, char * argv[])
     }
     close(server_fd);
     closelog();
-
+    return 0;
     // modify to accept -d argument, which forks after binding to 9000
     // fulltest
 }
