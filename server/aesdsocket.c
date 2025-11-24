@@ -17,6 +17,7 @@ typedef struct ClientStruct_t
 {
     int clientSocket;
     const char *filename;
+    struct sockaddr_in clientAddr;
     FILE *file;
 } ClientStruct;
 
@@ -26,7 +27,7 @@ void *reader_fnc(void *arg)
 {
     ClientStruct *ThisClient = (ClientStruct *)arg;
     int WaitForClient;
-    struct sockaddr_in clientAddr;
+    struct sockaddr_in clientAddr = ThisClient->clientAddr;
     char receiveBuff[2048];
     char *WritetoFileBuf = NULL;
     int WritetoFileBufSize = 0;
@@ -221,19 +222,18 @@ int main(int argc, char *argv[])
         }
         // client is accepted
         syslog(LOG_INFO, "Accepted connection from %s", inet_ntoa(clientAddr.sin_addr));
-        ClientStruct NewClient = {clientSocket,filename,file};
+        ClientStruct NewClient = {clientSocket,filename,clientAddr,file};
         if(pthread_create(&clientThread, NULL, reader_fnc, &NewClient)!=0)
         {
             syslog(LOG_PERROR, "Failed to create thread");
             close(server_fd);
             exit(EXIT_FAILURE);
         }
-        fclose(file);
-        close(clientSocket);
 
-        syslog(LOG_INFO, "Closed connection from %s", inet_ntoa(clientAddr.sin_addr));
+
     } while (!exitFlag);
 
+    fclose(file);
     if (remove(filename) == 0)
     {
         syslog(LOG_INFO, "File deleted sucessfully\n");
