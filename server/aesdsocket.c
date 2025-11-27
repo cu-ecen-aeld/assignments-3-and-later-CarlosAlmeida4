@@ -1,6 +1,6 @@
 #include <netdb.h>
 #include <sys/types.h>
-#include <sys/socket.h>
+#include <sys/socket.h>                         /*TODO !!!! Implement queue*/
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <stdio.h>
@@ -13,27 +13,44 @@
 #include <pthread.h>
 #include <sys/queue.h>
 
+pthread_mutex_t FileLock;
+
 typedef struct ClientStruct_t
 {
     int clientSocket;
     const char *filename;
     struct sockaddr_in clientAddr;
     FILE *file;
+    int isFinished;
 } ClientStruct;
+
+typedef struct node
+{
+    //TODO: define information here
+    ClientStruct clientStruct;
+    pthread_t nodeThread;
+    // This macro does the magic to point to other nodes
+    TAILQ_ENTRY(node) nodes; 
+}node_t;
+
+// This typedef creates a head_t that makes it easy for us to pass pointers to
+// head_t without the compiler complaining.
+typedef TAILQ_HEAD(head_s, node) head_t;
 
 volatile int exitFlag = 0;
 
 void *reader_fnc(void *arg)
 {
     ClientStruct *ThisClient = (ClientStruct *)arg;
-    int WaitForClient;
+    int WaitForClient, receiveErrorCounter;
     struct sockaddr_in clientAddr = ThisClient->clientAddr;
     char receiveBuff[2048];
     char *WritetoFileBuf = NULL;
-    int WritetoFileBufSize = 0;
+    int WritetoFileBufSize = 0,receiveErrorCounterLimit = 100;
     int clientSocket = ThisClient->clientSocket;
     const char *filename = ThisClient->filename;
-
+    ThisClient->isFinished = 0;
+   
     WaitForClient = 1;
     char *tmp = NULL;
     do
@@ -42,7 +59,16 @@ void *reader_fnc(void *arg)
         int receiveSize = recv(clientSocket, &receiveBuff, (sizeof(receiveBuff) - 1), 0);
         if (receiveSize < 0)
         {
+            if(receiveErrorCounter >= receiveErrorCounterLimit)
+            {
+                syslog(LOG_ERR, "To many receive errors exiting, Client Socket: %d",clientSocket);
+                close(ThisClient->clientSocket);
+                ThisClient->isFinished = 1;
+                exit(EXIT_FAILURE);
+            }
+            receiveErrorCounter++;
             syslog(LOG_ERR, "Failed receiving packet\n");
+
         }
         else
         {
@@ -79,15 +105,27 @@ void *reader_fnc(void *arg)
     if (ThisClient->file == NULL)
     {
         syslog(LOG_ERR, "Failed to open the file %s", filename);
-        close(clientSocket);
+        close(ThisClient->clientSocket);
+        ThisClient->isFinished = 1;
         exit(EXIT_FAILURE);
     }
+    //Lockfile
+    if(pthread_mutex_lock(&FileLock) != 0)
+    {
+        syslog(LOG_ERR, "Unable to aquire file access in the client socket %d", clientSocket);
+        close(ThisClient->clientSocket);
+        ThisClient->isFinished = 1;
+        exit(EXIT_FAILURE);
+    }
+
+
     if (fwrite(WritetoFileBuf, 1, WritetoFileBufSize, ThisClient->file) != WritetoFileBufSize)
     {
         syslog(LOG_ERR, "Failed to write entire buffer to file");
         // free(WritetoFileBuf);
-        fclose(ThisClient->file);
-        close(clientSocket);
+        //fclose(ThisClient->file);
+        close(ThisClient->clientSocket);
+        ThisClient->isFinished = 1;
         exit(EXIT_FAILURE);
     }
     fflush(ThisClient->file);
@@ -108,9 +146,18 @@ void *reader_fnc(void *arg)
         send(clientSocket, receiveBuff, strlen(receiveBuff), 0);
         // printf("%s",receiveBuff);
     }
+    //unlock file
+    if(pthread_mutex_unlock(&FileLock)!= 0)
+    {
+        syslog(LOG_ERR, "Unable to unlock file access in the client socket %d", clientSocket);
+        close(ThisClient->clientSocket);
+        ThisClient->isFinished = 1;
+        exit(EXIT_FAILURE);
+    }
     close(ThisClient->clientSocket);
 
     syslog(LOG_INFO, "Closed connection from %s", inet_ntoa(clientAddr.sin_addr));
+    ThisClient->isFinished = 1;
     return 0;
 }
 
@@ -130,8 +177,14 @@ int main(int argc, char *argv[])
     struct sockaddr_in clientAddr;
     socklen_t clientSize = sizeof(clientAddr);
 
-    pthread_t clientThread;
+    //pthread_t clientThread;
     
+
+    // Initialize the head before use
+    head_t head;
+    TAILQ_INIT(&head);
+
+
     struct sigaction sa;
     sa.sa_handler = signal_handler;
     sigemptyset(&sa.sa_mask);
@@ -209,7 +262,7 @@ int main(int argc, char *argv[])
 
     freeaddrinfo(servinfo);
 
-    do
+    while(!exitFlag)
     {
 
         clientSocket = accept(server_fd, (struct sockaddr *)&clientAddr, &clientSize);
@@ -223,15 +276,50 @@ int main(int argc, char *argv[])
         // client is accepted
         syslog(LOG_INFO, "Accepted connection from %s", inet_ntoa(clientAddr.sin_addr));
         ClientStruct NewClient = {clientSocket,filename,clientAddr,file};
+
+        node_t* newNode = malloc(sizeof(node_t));
+        if(newNode== NULL)
+        {
+            syslog(LOG_ERR, "Failed to malloc new node\n");
+            close(server_fd);
+            exit(EXIT_FAILURE);
+        }
+        // TODO - client thread must be substituted by a always newly created thread pointer which will be used to add to the node
+        pthread_t clientThread;
         if(pthread_create(&clientThread, NULL, reader_fnc, &NewClient)!=0)
         {
             syslog(LOG_PERROR, "Failed to create thread");
             close(server_fd);
             exit(EXIT_FAILURE);
         }
+        else // Add thread to list
+        {
+            newNode->clientStruct = NewClient;
+            newNode->nodeThread = clientThread;
+            TAILQ_INSERT_TAIL(&head,newNode,nodes);
+        }
 
 
-    } while (!exitFlag);
+    } /*while (!exitFlag);*/
+
+    //Join all still open threads
+    node_t *node, *tmp;
+
+    for (node = TAILQ_FIRST(&head); node != NULL; node = tmp) {
+        tmp = TAILQ_NEXT(node, nodes);
+
+        // Now it's safe to remove node
+        if (node->clientStruct.isFinished) {
+            pthread_join(node->nodeThread, NULL);
+            printf("Removed Client %d\n", node->clientStruct.clientSocket);
+            TAILQ_REMOVE(&head, node, nodes);
+            free(node);
+        }
+        else
+        {
+            syslog(LOG_INFO,"Client %d is not yet finished yet",node->clientStruct.clientSocket);
+        }
+    }
 
     fclose(file);
     if (remove(filename) == 0)
