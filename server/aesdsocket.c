@@ -13,7 +13,7 @@
 #include <pthread.h>
 #include <sys/queue.h>
 
-pthread_mutex_t FileLock;
+pthread_mutex_t FileLock = PTHREAD_MUTEX_INITIALIZER;
 
 typedef struct ClientStruct_t
 {
@@ -39,10 +39,41 @@ typedef TAILQ_HEAD(head_s, node) head_t;
 
 volatile int exitFlag = 0;
 
+void* timestamp_thread(void* arg)
+{
+    ClientStruct *ThisClient = (ClientStruct *)arg;
+
+    while (!exitFlag) {
+        sleep(10);
+
+        char timebuf[128];
+        time_t now = time(NULL);
+        struct tm *tm_info = localtime(&now);
+
+        strftime(timebuf, sizeof(timebuf),
+                 "%a, %d %b %Y %H:%M:%S %z", tm_info);
+
+        char outbuf[256];
+        snprintf(outbuf, sizeof(outbuf),
+                 "timestamp:%s\n", timebuf);
+
+        pthread_mutex_lock(&FileLock);
+
+        
+        if (ThisClient->file) {
+            fputs(outbuf, ThisClient->file);
+            fflush(ThisClient->file);
+        }
+
+        pthread_mutex_unlock(&FileLock);
+    }
+    return NULL;
+}
+
 void *reader_fnc(void *arg)
 {
     ClientStruct *ThisClient = (ClientStruct *)arg;
-    int WaitForClient, receiveErrorCounter;
+    int WaitForClient, receiveErrorCounter =0;
     struct sockaddr_in clientAddr = ThisClient->clientAddr;
     char receiveBuff[2048];
     char *WritetoFileBuf = NULL;
@@ -66,7 +97,7 @@ void *reader_fnc(void *arg)
                 ThisClient->isFinished = 1;
                 exit(EXIT_FAILURE);
             }
-            receiveErrorCounter++;
+            //receiveErrorCounter++;
             syslog(LOG_ERR, "Failed receiving packet\n");
 
         }
@@ -177,8 +208,7 @@ int main(int argc, char *argv[])
     struct sockaddr_in clientAddr;
     socklen_t clientSize = sizeof(clientAddr);
 
-    //pthread_t clientThread;
-    
+  
 
     // Initialize the head before use
     head_t head;
@@ -261,6 +291,31 @@ int main(int argc, char *argv[])
     }
 
     freeaddrinfo(servinfo);
+    
+    /*
+        Create timestamp thread
+    */
+    node_t* timestampNode = malloc(sizeof(node_t));
+    if(timestampNode== NULL)
+    {
+        syslog(LOG_ERR, "Failed to malloc new node\n");
+        close(server_fd);
+        exit(EXIT_FAILURE);
+    }
+
+    timestampNode->clientStruct.clientSocket = -1; /* not used */
+    timestampNode->clientStruct.filename = filename;
+    timestampNode->clientStruct.clientAddr = clientAddr;
+    timestampNode->clientStruct.file = file;
+    timestampNode->clientStruct.isFinished = 0;
+
+    /* create and pass the node's clientStruct pointer */
+    if (pthread_create(&timestampNode->nodeThread, NULL, timestamp_thread, &timestampNode->clientStruct) != 0) {
+        syslog(LOG_ERR, "Failed to create timestamp thread");
+        free(timestampNode);
+        /* handle error */
+    }   
+    //TAILQ_INSERT_TAIL(&head,timestampNode,nodes);
 
     while(!exitFlag)
     {
@@ -275,7 +330,6 @@ int main(int argc, char *argv[])
         }
         // client is accepted
         syslog(LOG_INFO, "Accepted connection from %s", inet_ntoa(clientAddr.sin_addr));
-        ClientStruct NewClient = {clientSocket,filename,clientAddr,file};
 
         node_t* newNode = malloc(sizeof(node_t));
         if(newNode== NULL)
@@ -284,25 +338,29 @@ int main(int argc, char *argv[])
             close(server_fd);
             exit(EXIT_FAILURE);
         }
-        // TODO - client thread must be substituted by a always newly created thread pointer which will be used to add to the node
-        pthread_t clientThread;
-        if(pthread_create(&clientThread, NULL, reader_fnc, &NewClient)!=0)
+        
+        /* Fill the node's client struct (copy values). Use the same FILE* and filename. */
+        newNode->clientStruct.clientSocket = clientSocket;
+        newNode->clientStruct.filename = filename;
+        newNode->clientStruct.clientAddr = clientAddr;
+        newNode->clientStruct.file = file;
+        newNode->clientStruct.isFinished = 0;
+        
+        TAILQ_INSERT_TAIL(&head,newNode,nodes);
+        
+        if(pthread_create(&newNode->nodeThread , NULL, reader_fnc, &newNode->clientStruct)!=0)
         {
             syslog(LOG_PERROR, "Failed to create thread");
             close(server_fd);
             exit(EXIT_FAILURE);
-        }
-        else // Add thread to list
-        {
-            newNode->clientStruct = NewClient;
-            newNode->nodeThread = clientThread;
-            TAILQ_INSERT_TAIL(&head,newNode,nodes);
         }
 
 
     } /*while (!exitFlag);*/
 
     //Join all still open threads
+    pthread_join(timestampNode->nodeThread,NULL);
+
     node_t *node, *tmp;
 
     for (node = TAILQ_FIRST(&head); node != NULL; node = tmp) {
