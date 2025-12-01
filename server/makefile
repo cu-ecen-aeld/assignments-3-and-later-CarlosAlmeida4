@@ -1,5 +1,5 @@
-CC := $(CROSS_COMPILE) gcc
-CFLAGS=-Wall -Werror -O0
+CC ?= $(CROSS_COMPILE) gcc
+CFLAGS ?=-Wall -Werror -O0
 all: aesdsocket
 
 default: aesdsocket
