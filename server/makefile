@@ -1,11 +1,12 @@
 CC ?= $(CROSS_COMPILE) gcc
 CFLAGS ?=-Wall -Werror -O0
+LDFLAGS ?= -pthread -lrt
 all: aesdsocket
 
 default: aesdsocket
 
 debug: aesdsocket.c 
-	$(CC) $(CFLAGS) aesdsocket.c -o aesdsocket
+	$(CC) $(CFLAGS) $(LDFLAGS) aesdsocket.c -o aesdsocket
 
 
 aesdsocket: aesdsocket.c 
