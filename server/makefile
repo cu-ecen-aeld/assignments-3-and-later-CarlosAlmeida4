@@ -10,7 +10,7 @@ debug: aesdsocket.c
 
 
 aesdsocket: aesdsocket.c 
-	$(CC) $(CFLAGS) aesdsocket.c -o aesdsocket
+	$(CC) $(CFLAGS) aesdsocket.c -o aesdsocket $(LDFLAGS)
 
 
 clean: 
