@@ -13,6 +13,17 @@
 #include <pthread.h>
 #include <sys/queue.h>
 
+#ifndef USE_AESD_CHAR_DEVICE
+    #define USE_AESD_CHAR_DEVICE 1
+#endif
+
+#if USE_AESD_CHAR_DEVICE
+    #define AESD_FILEPATH "/dev/aesdchar"
+#else
+    #define AESD_FILEPATH "/var/tmp/aesdsocketdata"
+#endif
+
+
 pthread_mutex_t FileLock = PTHREAD_MUTEX_INITIALIZER;
 
 typedef struct ClientStruct_t
@@ -228,7 +239,7 @@ int main(int argc, char *argv[])
         daemonMode = 1;
     }
     
-    const char *filename = "/var/tmp/aesdsocketdata";
+    const char *filename = AESD_FILEPATH;
     remove(filename); // remove older file if it exists
     FILE *file = fopen(filename, "a+");
     openlog(NULL, 0, LOG_USER);
@@ -291,7 +302,8 @@ int main(int argc, char *argv[])
     }
 
     freeaddrinfo(servinfo);
-    
+
+#if !USE_AESD_CHAR_DEVICE
     /*
         Create timestamp thread
     */
@@ -315,7 +327,7 @@ int main(int argc, char *argv[])
         free(timestampNode);
         /* handle error */
     }   
-    //TAILQ_INSERT_TAIL(&head,timestampNode,nodes);
+#endif
 
     while(!exitFlag)
     {
@@ -358,8 +370,10 @@ int main(int argc, char *argv[])
 
     } /*while (!exitFlag);*/
 
+#if !USE_AESD_CHAR_DEVICE    
     //Join all still open threads
     pthread_join(timestampNode->nodeThread,NULL);
+#endif
 
     node_t *node, *tmp;
 
@@ -380,6 +394,7 @@ int main(int argc, char *argv[])
     }
 
     fclose(file);
+#if !USE_AESD_CHAR_DEVICE
     if (remove(filename) == 0)
     {
         syslog(LOG_INFO, "File deleted sucessfully\n");
@@ -388,9 +403,9 @@ int main(int argc, char *argv[])
     {
         syslog(LOG_ERR, "Failed removing the file");
     }
+#endif
     close(server_fd);
     closelog();
     return 0;
-    // modify to accept -d argument, which forks after binding to 9000
-    // fulltest
+
 }
