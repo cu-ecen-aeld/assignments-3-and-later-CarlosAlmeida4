@@ -144,13 +144,6 @@ void *reader_fnc(void *arg)
     } while (WaitForClient);
 
     
-    if (ThisClient->file == NULL)
-    {
-        syslog(LOG_ERR, "Failed to open the file %s", filename);
-        close(ThisClient->clientSocket);
-        ThisClient->isFinished = 1;
-        exit(EXIT_FAILURE);
-    }
     //Lockfile
     if(pthread_mutex_lock(&FileLock) != 0)
     {
@@ -160,6 +153,14 @@ void *reader_fnc(void *arg)
         exit(EXIT_FAILURE);
     }
 
+    ThisClient->file = fopen(ThisClient->filename, "a+");
+    if (ThisClient->file == NULL)
+    {
+        syslog(LOG_ERR, "Failed to open the file %s", filename);
+        close(ThisClient->clientSocket);
+        ThisClient->isFinished = 1;
+        exit(EXIT_FAILURE);
+    }
 
     if (fwrite(WritetoFileBuf, 1, WritetoFileBufSize, ThisClient->file) != WritetoFileBufSize)
     {
@@ -179,7 +180,7 @@ void *reader_fnc(void *arg)
         WritetoFileBuf = NULL;
         WritetoFileBufSize = 0;
     }
-
+    
     // Write to client the entire file
     rewind(ThisClient->file);
     while (fgets(receiveBuff, 2048, ThisClient->file))
@@ -188,6 +189,8 @@ void *reader_fnc(void *arg)
         send(clientSocket, receiveBuff, strlen(receiveBuff), 0);
         // printf("%s",receiveBuff);
     }
+
+    fclose(ThisClient->file);
     //unlock file
     if(pthread_mutex_unlock(&FileLock)!= 0)
     {
@@ -240,17 +243,10 @@ int main(int argc, char *argv[])
     }
     
     const char *filename = AESD_FILEPATH;
-#if !USE_AESD_CHAR_DEVICE
+//#if !USE_AESD_CHAR_DEVICE
     remove(filename); // remove older file if it exists
-#endif
-    FILE *file = fopen(filename, "a+");
+//#endif
     openlog(NULL, 0, LOG_USER);
-
-    if (file == NULL)
-    {
-        syslog(LOG_ERR, "Failed to open the file %s", filename);
-        exit(EXIT_FAILURE);
-    }
 
     memset(&hints, 0, sizeof(hints));
     hints.ai_family = AF_INET;
@@ -357,7 +353,6 @@ int main(int argc, char *argv[])
         newNode->clientStruct.clientSocket = clientSocket;
         newNode->clientStruct.filename = filename;
         newNode->clientStruct.clientAddr = clientAddr;
-        newNode->clientStruct.file = file;
         newNode->clientStruct.isFinished = 0;
         
         TAILQ_INSERT_TAIL(&head,newNode,nodes);
@@ -395,7 +390,7 @@ int main(int argc, char *argv[])
         }
     }
 
-    fclose(file);
+    
 #if !USE_AESD_CHAR_DEVICE
     if (remove(filename) == 0)
     {
