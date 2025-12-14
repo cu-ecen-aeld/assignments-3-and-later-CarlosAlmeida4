@@ -49,7 +49,7 @@ typedef struct node
 typedef TAILQ_HEAD(head_s, node) head_t;
 
 volatile int exitFlag = 0;
-
+#if !USE_AESD_CHAR_DEVICE
 void* timestamp_thread(void* arg)
 {
     ClientStruct *ThisClient = (ClientStruct *)arg;
@@ -80,7 +80,7 @@ void* timestamp_thread(void* arg)
     }
     return NULL;
 }
-
+#endif
 void *reader_fnc(void *arg)
 {
     ClientStruct *ThisClient = (ClientStruct *)arg;
@@ -240,7 +240,9 @@ int main(int argc, char *argv[])
     }
     
     const char *filename = AESD_FILEPATH;
+#if !USE_AESD_CHAR_DEVICE
     remove(filename); // remove older file if it exists
+#endif
     FILE *file = fopen(filename, "a+");
     openlog(NULL, 0, LOG_USER);
 

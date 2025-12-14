@@ -19,7 +19,6 @@
 #include <linux/fs.h> // file_operations
 #include "aesdchar.h"
 #include <linux/slab.h>
-
 int aesd_major =   0; // use dynamic major
 int aesd_minor =   0;
 
@@ -73,8 +72,7 @@ ssize_t aesd_read(struct file *filp, char __user *buf, size_t count,
     if(entry == NULL)
     {
         retval = 0;
-        mutex_unlock(&dev->lock);
-        return retval;
+        goto exit;
     }
 
     bytes_to_read = entry->size - entry_offset;
@@ -83,12 +81,12 @@ ssize_t aesd_read(struct file *filp, char __user *buf, size_t count,
     
     if (copy_to_user(buf, entry->buffptr + entry_offset, bytes_to_read)) {
         retval = -EFAULT;
-        mutex_unlock(&dev->lock);
-        return retval;
+        goto exit;
     }
 
     *f_pos += bytes_to_read;
     retval = bytes_to_read;
+exit:
     mutex_unlock(&dev->lock);
     return retval;
 }
@@ -113,16 +111,13 @@ ssize_t aesd_write(struct file *filp, const char __user *buf, size_t count,
     
     if (!new_buffer) {
         retval = -ENOMEM;
-        mutex_unlock(&dev->lock);
-        return retval;
+        goto exit;
     }
     dev->current_entry = new_buffer;
 
     if (copy_from_user(dev->current_entry + dev->current_entry_size, buf, count)) {
         retval = -EFAULT;
-        mutex_unlock(&dev->lock);
-        return retval;
-        
+        goto exit;
     }
     
     dev->current_entry_size += count;
@@ -146,8 +141,9 @@ ssize_t aesd_write(struct file *filp, const char __user *buf, size_t count,
     }
 
     retval = count;
+    
+exit:
     mutex_unlock(&dev->lock);
- 
     return retval;
 }
 struct file_operations aesd_fops = {
