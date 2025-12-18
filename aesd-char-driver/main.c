@@ -124,21 +124,34 @@ ssize_t aesd_write(struct file *filp, const char __user *buf, size_t count,
 
     newline_ptr = memchr(dev->current_entry, '\n', dev->current_entry_size);
     
-    if (newline_ptr) {
-        struct aesd_buffer_entry new_entry;
-
-        new_entry.buffptr = dev->current_entry;
-        new_entry.size = dev->current_entry_size;
-
-        if (dev->buffer.full) {
+    while ((newline_ptr = memchr(dev->current_entry, '\n', dev->current_entry_size))) {
+    
+        size_t entry_size = newline_ptr - dev->current_entry + 1;
+    
+        struct aesd_buffer_entry new_entry = {
+            .buffptr = kmalloc(entry_size, GFP_KERNEL),
+            .size = entry_size,
+        };
+    
+        memcpy(new_entry.buffptr, dev->current_entry, entry_size);
+    
+        if (dev->buffer.full)
             kfree(dev->buffer.entry[dev->buffer.in_offs].buffptr);
-        }
-
+    
         aesd_circular_buffer_add_entry(&dev->buffer, &new_entry);
-
-        dev->current_entry = NULL;
-        dev->current_entry_size = 0;
+    
+        /* Move remaining data to front */
+        memmove(dev->current_entry,
+                dev->current_entry + entry_size,
+                dev->current_entry_size - entry_size);
+        
+        dev->current_entry_size -= entry_size;
+        
+        dev->current_entry = krealloc(dev->current_entry,
+                                      dev->current_entry_size,
+                                      GFP_KERNEL);
     }
+
 
     retval = count;
     
@@ -189,8 +202,8 @@ int aesd_init_module(void)
 
     mutex_init(&aesd_device.lock);
     aesd_circular_buffer_init(&aesd_device.buffer);
-    result = aesd_setup_cdev(&aesd_device);
     
+    result = aesd_setup_cdev(&aesd_device);
 
     if( result ) {
         unregister_chrdev_region(dev, 1);
@@ -209,11 +222,13 @@ void aesd_cleanup_module(void)
     /**
      * DONE: cleanup AESD specific poritions here as necessary
      */
-    kfree(aesd_device.current_entry);
+    
     AESD_CIRCULAR_BUFFER_FOREACH(entry, &aesd_device.buffer, index) {
         if (entry->buffptr)
             kfree(entry->buffptr);
     }
+    kfree(aesd_device.current_entry);
+
     unregister_chrdev_region(devno, 1);
 }
 
