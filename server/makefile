@@ -1,16 +1,17 @@
 CC ?= $(CROSS_COMPILE) gcc
 CFLAGS ?=-Wall -Werror -O0
 LDFLAGS ?= 
+ARGS ?= -I../aesd-char-driver
 all: aesdsocket
 
 default: aesdsocket
 
 debug: aesdsocket.c 
-	$(CC) $(CFLAGS) aesdsocket.c -o aesdsocket $(LDFLAGS)
+	$(CC) $(CFLAGS) $(ARGS) aesdsocket.c -o aesdsocket $(LDFLAGS)
 
 
 aesdsocket: aesdsocket.c 
-	$(CC) $(CFLAGS) aesdsocket.c -o aesdsocket $(LDFLAGS)
+	$(CC) $(CFLAGS) $(ARGS) aesdsocket.c -o aesdsocket $(LDFLAGS)
 
 
 clean: 

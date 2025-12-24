@@ -1,6 +1,6 @@
 #include <netdb.h>
 #include <sys/types.h>
-#include <sys/socket.h>                         /*TODO !!!! Implement queue*/
+#include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <stdio.h>
@@ -12,17 +12,21 @@
 #include <errno.h>
 #include <pthread.h>
 #include <sys/queue.h>
+#include <sys/ioctl.h>
+#include <fcntl.h>
+#include "aesd_ioctl.h"
+
+#define SEEKTO_PREFIX "AESDCHAR_IOCSEEKTO:"
 
 #ifndef USE_AESD_CHAR_DEVICE
-    #define USE_AESD_CHAR_DEVICE 1
+#define USE_AESD_CHAR_DEVICE 1
 #endif
 
 #if USE_AESD_CHAR_DEVICE
-    #define AESD_FILEPATH "/dev/aesdchar"
+#define AESD_FILEPATH "/dev/aesdchar"
 #else
-    #define AESD_FILEPATH "/var/tmp/aesdsocketdata"
+#define AESD_FILEPATH "/var/tmp/aesdsocketdata"
 #endif
-
 
 pthread_mutex_t FileLock = PTHREAD_MUTEX_INITIALIZER;
 
@@ -37,12 +41,13 @@ typedef struct ClientStruct_t
 
 typedef struct node
 {
-    //TODO: define information here
+    // TODO: define information here
     ClientStruct clientStruct;
     pthread_t nodeThread;
     // This macro does the magic to point to other nodes
-    TAILQ_ENTRY(node) nodes; 
-}node_t;
+    TAILQ_ENTRY(node)
+    nodes;
+} node_t;
 
 // This typedef creates a head_t that makes it easy for us to pass pointers to
 // head_t without the compiler complaining.
@@ -50,11 +55,12 @@ typedef TAILQ_HEAD(head_s, node) head_t;
 
 volatile int exitFlag = 0;
 #if !USE_AESD_CHAR_DEVICE
-void* timestamp_thread(void* arg)
+void *timestamp_thread(void *arg)
 {
     ClientStruct *ThisClient = (ClientStruct *)arg;
 
-    while (!exitFlag) {
+    while (!exitFlag)
+    {
         sleep(10);
 
         char timebuf[128];
@@ -70,8 +76,8 @@ void* timestamp_thread(void* arg)
 
         pthread_mutex_lock(&FileLock);
 
-        
-        if (ThisClient->file) {
+        if (ThisClient->file)
+        {
             fputs(outbuf, ThisClient->file);
             fflush(ThisClient->file);
         }
@@ -84,15 +90,15 @@ void* timestamp_thread(void* arg)
 void *reader_fnc(void *arg)
 {
     ClientStruct *ThisClient = (ClientStruct *)arg;
-    int WaitForClient, receiveErrorCounter =0;
+    int WaitForClient, receiveErrorCounter = 0;
     struct sockaddr_in clientAddr = ThisClient->clientAddr;
     char receiveBuff[2048];
     char *WritetoFileBuf = NULL;
-    int WritetoFileBufSize = 0,receiveErrorCounterLimit = 100;
+    int WritetoFileBufSize = 0, receiveErrorCounterLimit = 100;
     int clientSocket = ThisClient->clientSocket;
     const char *filename = ThisClient->filename;
     ThisClient->isFinished = 0;
-   
+
     WaitForClient = 1;
     char *tmp = NULL;
     do
@@ -101,16 +107,15 @@ void *reader_fnc(void *arg)
         int receiveSize = recv(clientSocket, &receiveBuff, (sizeof(receiveBuff) - 1), 0);
         if (receiveSize < 0)
         {
-            if(receiveErrorCounter >= receiveErrorCounterLimit)
+            if (receiveErrorCounter >= receiveErrorCounterLimit)
             {
-                syslog(LOG_ERR, "To many receive errors exiting, Client Socket: %d",clientSocket);
+                syslog(LOG_ERR, "To many receive errors exiting, Client Socket: %d", clientSocket);
                 close(ThisClient->clientSocket);
                 ThisClient->isFinished = 1;
                 exit(EXIT_FAILURE);
             }
-            //receiveErrorCounter++;
+            // receiveErrorCounter++;
             syslog(LOG_ERR, "Failed receiving packet\n");
-
         }
         else
         {
@@ -143,62 +148,120 @@ void *reader_fnc(void *arg)
         }
     } while (WaitForClient);
 
-    
-    //Lockfile
-    if(pthread_mutex_lock(&FileLock) != 0)
+    if (strncmp(WritetoFileBuf, SEEKTO_PREFIX, strlen(SEEKTO_PREFIX)) == 0)
     {
-        syslog(LOG_ERR, "Unable to aquire file access in the client socket %d", clientSocket);
-        close(ThisClient->clientSocket);
-        ThisClient->isFinished = 1;
-        exit(EXIT_FAILURE);
+        uint32_t write_cmd, write_cmd_offset;
+        syslog(LOG_DEBUG, "Detected IOCSEEKTO command: %s", WritetoFileBuf);
+        // Lockfile
+        if (pthread_mutex_lock(&FileLock) != 0)
+        {
+            syslog(LOG_ERR, "Unable to aquire file access in the client socket %d", clientSocket);
+            close(ThisClient->clientSocket);
+            ThisClient->isFinished = 1;
+            exit(EXIT_FAILURE);
+        }
+        if (sscanf(WritetoFileBuf + strlen(SEEKTO_PREFIX), "%u,%u", &write_cmd, &write_cmd_offset) == 2)
+        {
+            syslog(LOG_DEBUG, "Parsed IOCSEEKTO: cmd=%u, offset=%u", write_cmd, write_cmd_offset);
+            int fd = open(ThisClient->filename, O_RDWR);
+            if (fd >= 0)
+            {
+                struct aesd_seekto seekto = {.write_cmd = write_cmd, .write_cmd_offset = write_cmd_offset};
+                int ioctl_ret = ioctl(fd, AESDCHAR_IOCSEEKTO, &seekto);
+                syslog(LOG_DEBUG, "ioctl returned %d, errno=%d", ioctl_ret, errno);
+                if (ioctl_ret == 0)
+                {
+                    /* Check position after ioctl */
+                    off_t pos = lseek(fd, 0, SEEK_CUR);
+                    syslog(LOG_DEBUG, "Position after ioctl: %ld", (long)pos);
+                    /* Read from seeked position and send back */
+                    ssize_t bytes_read;
+                    while ((bytes_read = read(fd, receiveBuff, 2048)) > 0)
+                    {
+                        syslog(LOG_DEBUG, "Read %zd bytes", bytes_read);
+                        send(ThisClient->clientSocket, receiveBuff, bytes_read, 0);
+                    }
+                }
+                close(fd);
+            }
+            else
+            {
+                syslog(LOG_ERR, "Failed to open %s for ioctl: %s", ThisClient->filename, strerror(errno));
+            }
+        }
+        else
+        {
+            syslog(LOG_ERR, "Failed to parse IOCSEEKTO parameters from: %s", WritetoFileBuf);
+        }
+        if (pthread_mutex_unlock(&FileLock) != 0)
+        {
+            syslog(LOG_ERR, "Unable to unlock file access in the client socket %d", clientSocket);
+            close(ThisClient->clientSocket);
+            ThisClient->isFinished = 1;
+            exit(EXIT_FAILURE);
+        }
+    }
+    else
+    {
+
+        // Lockfile
+        if (pthread_mutex_lock(&FileLock) != 0)
+        {
+            syslog(LOG_ERR, "Unable to aquire file access in the client socket %d", clientSocket);
+            close(ThisClient->clientSocket);
+            ThisClient->isFinished = 1;
+            exit(EXIT_FAILURE);
+        }
+
+        ThisClient->file = fopen(ThisClient->filename, "a+");
+        if (ThisClient->file == NULL)
+        {
+            syslog(LOG_ERR, "Failed to open the file %s", filename);
+            close(ThisClient->clientSocket);
+            ThisClient->isFinished = 1;
+            exit(EXIT_FAILURE);
+        }
+
+        if (fwrite(WritetoFileBuf, 1, WritetoFileBufSize, ThisClient->file) != WritetoFileBufSize)
+        {
+            syslog(LOG_ERR, "Failed to write entire buffer to file");
+            // free(WritetoFileBuf);
+            // fclose(ThisClient->file);
+            close(ThisClient->clientSocket);
+            ThisClient->isFinished = 1;
+            exit(EXIT_FAILURE);
+        }
+        fflush(ThisClient->file);
+
+        if (WritetoFileBuf != NULL)
+        {
+            // WritetoFileBuf = NULL;
+            free(WritetoFileBuf);
+            WritetoFileBuf = NULL;
+            WritetoFileBufSize = 0;
+        }
+
+        // Write to client the entire file
+        rewind(ThisClient->file);
+        while (fgets(receiveBuff, 2048, ThisClient->file))
+        {
+
+            // send the buffer to the client
+            send(clientSocket, receiveBuff, strlen(receiveBuff), 0);
+            // printf("%s",receiveBuff);
+        }
+
+        fclose(ThisClient->file);
+        // unlock file
+        if (pthread_mutex_unlock(&FileLock) != 0)
+        {
+            syslog(LOG_ERR, "Unable to unlock file access in the client socket %d", clientSocket);
+            close(ThisClient->clientSocket);
+            ThisClient->isFinished = 1;
+            exit(EXIT_FAILURE);
+        }
     }
 
-    ThisClient->file = fopen(ThisClient->filename, "a+");
-    if (ThisClient->file == NULL)
-    {
-        syslog(LOG_ERR, "Failed to open the file %s", filename);
-        close(ThisClient->clientSocket);
-        ThisClient->isFinished = 1;
-        exit(EXIT_FAILURE);
-    }
-
-    if (fwrite(WritetoFileBuf, 1, WritetoFileBufSize, ThisClient->file) != WritetoFileBufSize)
-    {
-        syslog(LOG_ERR, "Failed to write entire buffer to file");
-        // free(WritetoFileBuf);
-        //fclose(ThisClient->file);
-        close(ThisClient->clientSocket);
-        ThisClient->isFinished = 1;
-        exit(EXIT_FAILURE);
-    }
-    fflush(ThisClient->file);
-
-    if (WritetoFileBuf != NULL)
-    {
-        // WritetoFileBuf = NULL;
-        free(WritetoFileBuf);
-        WritetoFileBuf = NULL;
-        WritetoFileBufSize = 0;
-    }
-    
-    // Write to client the entire file
-    rewind(ThisClient->file);
-    while (fgets(receiveBuff, 2048, ThisClient->file))
-    {
-        // send the buffer to the client
-        send(clientSocket, receiveBuff, strlen(receiveBuff), 0);
-        // printf("%s",receiveBuff);
-    }
-
-    fclose(ThisClient->file);
-    //unlock file
-    if(pthread_mutex_unlock(&FileLock)!= 0)
-    {
-        syslog(LOG_ERR, "Unable to unlock file access in the client socket %d", clientSocket);
-        close(ThisClient->clientSocket);
-        ThisClient->isFinished = 1;
-        exit(EXIT_FAILURE);
-    }
     close(ThisClient->clientSocket);
 
     syslog(LOG_INFO, "Closed connection from %s", inet_ntoa(clientAddr.sin_addr));
@@ -222,12 +285,9 @@ int main(int argc, char *argv[])
     struct sockaddr_in clientAddr;
     socklen_t clientSize = sizeof(clientAddr);
 
-  
-
     // Initialize the head before use
     head_t head;
     TAILQ_INIT(&head);
-
 
     struct sigaction sa;
     sa.sa_handler = signal_handler;
@@ -241,11 +301,11 @@ int main(int argc, char *argv[])
     {
         daemonMode = 1;
     }
-    
+
     const char *filename = AESD_FILEPATH;
-//#if !USE_AESD_CHAR_DEVICE
+    #if !USE_AESD_CHAR_DEVICE
     remove(filename); // remove older file if it exists
-//#endif
+    #endif
     openlog(NULL, 0, LOG_USER);
 
     memset(&hints, 0, sizeof(hints));
@@ -305,8 +365,8 @@ int main(int argc, char *argv[])
     /*
         Create timestamp thread
     */
-    node_t* timestampNode = malloc(sizeof(node_t));
-    if(timestampNode== NULL)
+    node_t *timestampNode = malloc(sizeof(node_t));
+    if (timestampNode == NULL)
     {
         syslog(LOG_ERR, "Failed to malloc new node\n");
         close(server_fd);
@@ -320,14 +380,15 @@ int main(int argc, char *argv[])
     timestampNode->clientStruct.isFinished = 0;
 
     /* create and pass the node's clientStruct pointer */
-    if (pthread_create(&timestampNode->nodeThread, NULL, timestamp_thread, &timestampNode->clientStruct) != 0) {
+    if (pthread_create(&timestampNode->nodeThread, NULL, timestamp_thread, &timestampNode->clientStruct) != 0)
+    {
         syslog(LOG_ERR, "Failed to create timestamp thread");
         free(timestampNode);
         /* handle error */
-    }   
+    }
 #endif
 
-    while(!exitFlag)
+    while (!exitFlag)
     {
 
         clientSocket = accept(server_fd, (struct sockaddr *)&clientAddr, &clientSize);
@@ -341,44 +402,45 @@ int main(int argc, char *argv[])
         // client is accepted
         syslog(LOG_INFO, "Accepted connection from %s", inet_ntoa(clientAddr.sin_addr));
 
-        node_t* newNode = malloc(sizeof(node_t));
-        if(newNode== NULL)
+        node_t *newNode = malloc(sizeof(node_t));
+        if (newNode == NULL)
         {
             syslog(LOG_ERR, "Failed to malloc new node\n");
             close(server_fd);
             exit(EXIT_FAILURE);
         }
-        
+
         /* Fill the node's client struct (copy values). Use the same FILE* and filename. */
         newNode->clientStruct.clientSocket = clientSocket;
         newNode->clientStruct.filename = filename;
         newNode->clientStruct.clientAddr = clientAddr;
         newNode->clientStruct.isFinished = 0;
-        
-        TAILQ_INSERT_TAIL(&head,newNode,nodes);
-        
-        if(pthread_create(&newNode->nodeThread , NULL, reader_fnc, &newNode->clientStruct)!=0)
+
+        TAILQ_INSERT_TAIL(&head, newNode, nodes);
+
+        if (pthread_create(&newNode->nodeThread, NULL, reader_fnc, &newNode->clientStruct) != 0)
         {
             syslog(LOG_PERROR, "Failed to create thread");
             close(server_fd);
             exit(EXIT_FAILURE);
         }
 
-
     } /*while (!exitFlag);*/
 
-#if !USE_AESD_CHAR_DEVICE    
-    //Join all still open threads
-    pthread_join(timestampNode->nodeThread,NULL);
+#if !USE_AESD_CHAR_DEVICE
+    // Join all still open threads
+    pthread_join(timestampNode->nodeThread, NULL);
 #endif
 
     node_t *node, *tmp;
 
-    for (node = TAILQ_FIRST(&head); node != NULL; node = tmp) {
+    for (node = TAILQ_FIRST(&head); node != NULL; node = tmp)
+    {
         tmp = TAILQ_NEXT(node, nodes);
 
         // Now it's safe to remove node
-        if (node->clientStruct.isFinished) {
+        if (node->clientStruct.isFinished)
+        {
             pthread_join(node->nodeThread, NULL);
             printf("Removed Client %d\n", node->clientStruct.clientSocket);
             TAILQ_REMOVE(&head, node, nodes);
@@ -386,11 +448,10 @@ int main(int argc, char *argv[])
         }
         else
         {
-            syslog(LOG_INFO,"Client %d is not yet finished yet",node->clientStruct.clientSocket);
+            syslog(LOG_INFO, "Client %d is not yet finished yet", node->clientStruct.clientSocket);
         }
     }
 
-    
 #if !USE_AESD_CHAR_DEVICE
     if (remove(filename) == 0)
     {
@@ -404,5 +465,4 @@ int main(int argc, char *argv[])
     close(server_fd);
     closelog();
     return 0;
-
 }
