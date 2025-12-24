@@ -18,9 +18,7 @@
 
 #define SEEKTO_PREFIX "AESDCHAR_IOCSEEKTO:"
 
-#ifndef USE_AESD_CHAR_DEVICE
 #define USE_AESD_CHAR_DEVICE 1
-#endif
 
 #if USE_AESD_CHAR_DEVICE
 #define AESD_FILEPATH "/dev/aesdchar"
@@ -29,439 +27,157 @@
 #endif
 
 pthread_mutex_t FileLock = PTHREAD_MUTEX_INITIALIZER;
+volatile sig_atomic_t exitFlag = 0;
 
-typedef struct ClientStruct_t
+typedef struct
 {
     int clientSocket;
-    const char *filename;
     struct sockaddr_in clientAddr;
-    FILE *file;
-    int isFinished;
-} ClientStruct;
-
-typedef struct node
-{
-    // TODO: define information here
-    ClientStruct clientStruct;
-    pthread_t nodeThread;
-    // This macro does the magic to point to other nodes
-    TAILQ_ENTRY(node)
-    nodes;
-} node_t;
-
-// This typedef creates a head_t that makes it easy for us to pass pointers to
-// head_t without the compiler complaining.
-typedef TAILQ_HEAD(head_s, node) head_t;
-
-volatile int exitFlag = 0;
-#if !USE_AESD_CHAR_DEVICE
-void *timestamp_thread(void *arg)
-{
-    ClientStruct *ThisClient = (ClientStruct *)arg;
-
-    while (!exitFlag)
-    {
-        sleep(10);
-
-        char timebuf[128];
-        time_t now = time(NULL);
-        struct tm *tm_info = localtime(&now);
-
-        strftime(timebuf, sizeof(timebuf),
-                 "%a, %d %b %Y %H:%M:%S %z", tm_info);
-
-        char outbuf[256];
-        snprintf(outbuf, sizeof(outbuf),
-                 "timestamp:%s\n", timebuf);
-
-        pthread_mutex_lock(&FileLock);
-
-        if (ThisClient->file)
-        {
-            fputs(outbuf, ThisClient->file);
-            fflush(ThisClient->file);
-        }
-
-        pthread_mutex_unlock(&FileLock);
-    }
-    return NULL;
-}
-#endif
-void *reader_fnc(void *arg)
-{
-    ClientStruct *ThisClient = (ClientStruct *)arg;
-    int WaitForClient, receiveErrorCounter = 0;
-    struct sockaddr_in clientAddr = ThisClient->clientAddr;
-    char receiveBuff[2048];
-    char *WritetoFileBuf = NULL;
-    int WritetoFileBufSize = 0, receiveErrorCounterLimit = 100;
-    int clientSocket = ThisClient->clientSocket;
-    const char *filename = ThisClient->filename;
-    ThisClient->isFinished = 0;
-
-    WaitForClient = 1;
-    char *tmp = NULL;
-    do
-    {
-
-        int receiveSize = recv(clientSocket, &receiveBuff, (sizeof(receiveBuff) - 1), 0);
-        if (receiveSize < 0)
-        {
-            if (receiveErrorCounter >= receiveErrorCounterLimit)
-            {
-                syslog(LOG_ERR, "To many receive errors exiting, Client Socket: %d", clientSocket);
-                close(ThisClient->clientSocket);
-                ThisClient->isFinished = 1;
-                exit(EXIT_FAILURE);
-            }
-            // receiveErrorCounter++;
-            syslog(LOG_ERR, "Failed receiving packet\n");
-        }
-        else
-        {
-            receiveBuff[receiveSize] = '\0';
-            // printf("bufsize %d Received: %s\n",WritetoFileBufSize, receiveBuff);
-            int newSize = receiveSize + WritetoFileBufSize + 1;
-            tmp = (char *)realloc(WritetoFileBuf, newSize);
-
-            if (tmp == NULL)
-            {
-                syslog(LOG_ERR, "Failed allocating memory Package size: %d", receiveSize);
-                syslog(LOG_ERR, "Current buffer size: %d", WritetoFileBufSize);
-
-                break;
-            }
-            WritetoFileBuf = tmp;
-
-            if (WritetoFileBufSize == 0)
-            {
-                WritetoFileBuf[0] = '\0';
-            }
-            strcat(WritetoFileBuf, receiveBuff);
-
-            WritetoFileBufSize = WritetoFileBufSize + receiveSize;
-        }
-
-        if (strchr(receiveBuff, '\n')) // finished packet
-        {
-            WaitForClient = 0;
-        }
-    } while (WaitForClient);
-
-    if (strncmp(WritetoFileBuf, SEEKTO_PREFIX, strlen(SEEKTO_PREFIX)) == 0)
-    {
-        uint32_t write_cmd, write_cmd_offset;
-        syslog(LOG_DEBUG, "Detected IOCSEEKTO command: %s", WritetoFileBuf);
-        // Lockfile
-        if (pthread_mutex_lock(&FileLock) != 0)
-        {
-            syslog(LOG_ERR, "Unable to aquire file access in the client socket %d", clientSocket);
-            close(ThisClient->clientSocket);
-            ThisClient->isFinished = 1;
-            exit(EXIT_FAILURE);
-        }
-        if (sscanf(WritetoFileBuf + strlen(SEEKTO_PREFIX), "%u,%u", &write_cmd, &write_cmd_offset) == 2)
-        {
-            syslog(LOG_DEBUG, "Parsed IOCSEEKTO: cmd=%u, offset=%u", write_cmd, write_cmd_offset);
-            int fd = open(ThisClient->filename, O_RDWR);
-            if (fd >= 0)
-            {
-                struct aesd_seekto seekto = {.write_cmd = write_cmd, .write_cmd_offset = write_cmd_offset};
-                int ioctl_ret = ioctl(fd, AESDCHAR_IOCSEEKTO, &seekto);
-                syslog(LOG_DEBUG, "ioctl returned %d, errno=%d", ioctl_ret, errno);
-                if (ioctl_ret == 0)
-                {
-                    /* Check position after ioctl */
-                    off_t pos = lseek(fd, 0, SEEK_CUR);
-                    syslog(LOG_DEBUG, "Position after ioctl: %ld", (long)pos);
-                    /* Read from seeked position and send back */
-                    ssize_t bytes_read;
-                    while ((bytes_read = read(fd, receiveBuff, 2048)) > 0)
-                    {
-                        syslog(LOG_DEBUG, "Read %zd bytes", bytes_read);
-                        send(ThisClient->clientSocket, receiveBuff, bytes_read, 0);
-                    }
-                }
-                close(fd);
-            }
-            else
-            {
-                syslog(LOG_ERR, "Failed to open %s for ioctl: %s", ThisClient->filename, strerror(errno));
-            }
-        }
-        else
-        {
-            syslog(LOG_ERR, "Failed to parse IOCSEEKTO parameters from: %s", WritetoFileBuf);
-        }
-        if (pthread_mutex_unlock(&FileLock) != 0)
-        {
-            syslog(LOG_ERR, "Unable to unlock file access in the client socket %d", clientSocket);
-            close(ThisClient->clientSocket);
-            ThisClient->isFinished = 1;
-            exit(EXIT_FAILURE);
-        }
-    }
-    else
-    {
-
-        // Lockfile
-        if (pthread_mutex_lock(&FileLock) != 0)
-        {
-            syslog(LOG_ERR, "Unable to aquire file access in the client socket %d", clientSocket);
-            close(ThisClient->clientSocket);
-            ThisClient->isFinished = 1;
-            exit(EXIT_FAILURE);
-        }
-
-        ThisClient->file = fopen(ThisClient->filename, "a+");
-        if (ThisClient->file == NULL)
-        {
-            syslog(LOG_ERR, "Failed to open the file %s", filename);
-            close(ThisClient->clientSocket);
-            ThisClient->isFinished = 1;
-            exit(EXIT_FAILURE);
-        }
-
-        if (fwrite(WritetoFileBuf, 1, WritetoFileBufSize, ThisClient->file) != WritetoFileBufSize)
-        {
-            syslog(LOG_ERR, "Failed to write entire buffer to file");
-            // free(WritetoFileBuf);
-            // fclose(ThisClient->file);
-            close(ThisClient->clientSocket);
-            ThisClient->isFinished = 1;
-            exit(EXIT_FAILURE);
-        }
-        fflush(ThisClient->file);
-
-        if (WritetoFileBuf != NULL)
-        {
-            // WritetoFileBuf = NULL;
-            free(WritetoFileBuf);
-            WritetoFileBuf = NULL;
-            WritetoFileBufSize = 0;
-        }
-
-        // Write to client the entire file
-        rewind(ThisClient->file);
-        while (fgets(receiveBuff, 2048, ThisClient->file))
-        {
-
-            // send the buffer to the client
-            send(clientSocket, receiveBuff, strlen(receiveBuff), 0);
-            // printf("%s",receiveBuff);
-        }
-
-        fclose(ThisClient->file);
-        // unlock file
-        if (pthread_mutex_unlock(&FileLock) != 0)
-        {
-            syslog(LOG_ERR, "Unable to unlock file access in the client socket %d", clientSocket);
-            close(ThisClient->clientSocket);
-            ThisClient->isFinished = 1;
-            exit(EXIT_FAILURE);
-        }
-    }
-
-    close(ThisClient->clientSocket);
-
-    syslog(LOG_INFO, "Closed connection from %s", inet_ntoa(clientAddr.sin_addr));
-    ThisClient->isFinished = 1;
-    return 0;
-}
+} client_t;
 
 void signal_handler(int signal)
 {
-    syslog(LOG_ERR, "Caught signal, exiting");
+    (void)signal;
     exitFlag = 1;
+}
+
+void *client_thread(void *arg)
+{
+    client_t *client = (client_t *)arg;
+    char recvbuf[2048];
+    char *packet = NULL;
+    size_t packet_size = 0;
+    ssize_t rcv;
+    int fd;
+
+    fd = open(AESD_FILEPATH, O_RDWR);
+    if (fd < 0) {
+        syslog(LOG_ERR, "Failed to open device");
+        goto cleanup;
+    }
+
+    /* Receive until newline */
+    while ((rcv = recv(client->clientSocket, recvbuf,
+                       sizeof(recvbuf), 0)) > 0)
+    {
+        char *tmp = realloc(packet, packet_size + rcv);
+        if (!tmp) {
+            syslog(LOG_ERR, "realloc failed");
+            goto cleanup;
+        }
+        packet = tmp;
+        memcpy(packet + packet_size, recvbuf, rcv);
+        packet_size += rcv;
+
+        if (memchr(recvbuf, '\n', rcv))
+            break;
+    }
+
+    if (!packet)
+        goto cleanup;
+
+    pthread_mutex_lock(&FileLock);
+
+    /* IOCSEEKTO handling */
+    if (!strncmp(packet, SEEKTO_PREFIX, strlen(SEEKTO_PREFIX))) {
+
+        uint32_t cmd, offset;
+        if (sscanf(packet + strlen(SEEKTO_PREFIX),
+                   "%u,%u", &cmd, &offset) == 2) {
+
+            struct aesd_seekto seekto = {
+                .write_cmd = cmd,
+                .write_cmd_offset = offset
+            };
+
+            if (ioctl(fd, AESDCHAR_IOCSEEKTO, &seekto) == 0) {
+                ssize_t rd;
+                while ((rd = read(fd, recvbuf, sizeof(recvbuf))) > 0) {
+                    send(client->clientSocket, recvbuf, rd, 0);
+                }
+            }
+        }
+    }
+    else {
+        /* Normal write */
+        write(fd, packet, packet_size);
+
+        /* Return entire contents */
+        lseek(fd, 0, SEEK_SET);
+        ssize_t rd;
+        while ((rd = read(fd, recvbuf, sizeof(recvbuf))) > 0) {
+            send(client->clientSocket, recvbuf, rd, 0);
+        }
+    }
+
+    pthread_mutex_unlock(&FileLock);
+
+cleanup:
+    if (fd >= 0)
+        close(fd);
+    close(client->clientSocket);
+    free(packet);
+    free(client);
+    return NULL;
 }
 
 int main(int argc, char *argv[])
 {
-    int server_fd, clientSocket, rc, daemonMode = 0;
-    const char PORT[] = "9000";
-    int getAddrInfoRes;
-    struct addrinfo *servinfo;
-    struct addrinfo hints;
-    struct sockaddr_in clientAddr;
-    socklen_t clientSize = sizeof(clientAddr);
+    int server_fd;
+    struct addrinfo hints = {0}, *res;
+    struct sigaction sa = {0};
 
-    // Initialize the head before use
-    head_t head;
-    TAILQ_INIT(&head);
+    openlog("aesdsocket", 0, LOG_USER);
 
-    struct sigaction sa;
     sa.sa_handler = signal_handler;
-    sigemptyset(&sa.sa_mask);
-    sa.sa_flags = 0;
-
     sigaction(SIGINT, &sa, NULL);
     sigaction(SIGTERM, &sa, NULL);
 
-    if (argc == 2 && strcmp(argv[1], "-d") == 0)
-    {
-        daemonMode = 1;
-    }
-
-    const char *filename = AESD_FILEPATH;
-    #if !USE_AESD_CHAR_DEVICE
-    remove(filename); // remove older file if it exists
-    #endif
-    openlog(NULL, 0, LOG_USER);
-
-    memset(&hints, 0, sizeof(hints));
     hints.ai_family = AF_INET;
-    hints.ai_flags = AI_PASSIVE;
     hints.ai_socktype = SOCK_STREAM;
+    hints.ai_flags = AI_PASSIVE;
 
-    getAddrInfoRes = getaddrinfo(NULL, PORT, &hints, &servinfo);
-    if (getAddrInfoRes != 0)
-    {
-        syslog(LOG_ERR, "Failed to get address info");
+    if (getaddrinfo(NULL, "9000", &hints, &res) != 0)
         exit(EXIT_FAILURE);
-    }
 
-    if ((server_fd = socket(AF_INET, SOCK_STREAM, 0)) < 0)
-    {
-        syslog(LOG_ERR, "Failed to get socket");
+    server_fd = socket(res->ai_family, res->ai_socktype, 0);
+    if (server_fd < 0)
         exit(EXIT_FAILURE);
-    }
+
     int opt = 1;
-    if (setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) == -1)
-    {
-        syslog(LOG_ERR, "Error setting socket options");
-        exit(EXIT_FAILURE);
-    }
-    rc = bind(server_fd, servinfo->ai_addr, servinfo->ai_addrlen);
-    if (rc != 0)
-    {
-        syslog(LOG_ERR, "Failed to bind");
-        exit(EXIT_FAILURE);
-    }
+    setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
 
-    if (daemonMode)
-    {
-        pid_t p = fork();
-        if (p < 0)
-        {
-            syslog(LOG_ERR, "Failed to fork the program");
-            exit(EXIT_FAILURE);
-        }
-        if (p > 0)
-        {
+    if (bind(server_fd, res->ai_addr, res->ai_addrlen) != 0)
+        exit(EXIT_FAILURE);
+
+    freeaddrinfo(res);
+
+    if (argc == 2 && strcmp(argv[1], "-d") == 0) {
+        if (fork() > 0)
             exit(EXIT_SUCCESS);
-        }
         setsid();
     }
 
-    if (listen(server_fd, 10) < 0)
-    {
-        syslog(LOG_ERR, "unable to listen");
-        exit(EXIT_FAILURE);
-    }
+    listen(server_fd, 10);
 
-    freeaddrinfo(servinfo);
+    while (!exitFlag) {
+        client_t *client = malloc(sizeof(client_t));
+        socklen_t len = sizeof(client->clientAddr);
 
-#if !USE_AESD_CHAR_DEVICE
-    /*
-        Create timestamp thread
-    */
-    node_t *timestampNode = malloc(sizeof(node_t));
-    if (timestampNode == NULL)
-    {
-        syslog(LOG_ERR, "Failed to malloc new node\n");
-        close(server_fd);
-        exit(EXIT_FAILURE);
-    }
+        client->clientSocket =
+            accept(server_fd,
+                   (struct sockaddr *)&client->clientAddr, &len);
 
-    timestampNode->clientStruct.clientSocket = -1; /* not used */
-    timestampNode->clientStruct.filename = filename;
-    timestampNode->clientStruct.clientAddr = clientAddr;
-    timestampNode->clientStruct.file = file;
-    timestampNode->clientStruct.isFinished = 0;
-
-    /* create and pass the node's clientStruct pointer */
-    if (pthread_create(&timestampNode->nodeThread, NULL, timestamp_thread, &timestampNode->clientStruct) != 0)
-    {
-        syslog(LOG_ERR, "Failed to create timestamp thread");
-        free(timestampNode);
-        /* handle error */
-    }
-#endif
-
-    while (!exitFlag)
-    {
-
-        clientSocket = accept(server_fd, (struct sockaddr *)&clientAddr, &clientSize);
-
-        if (clientSocket < 0)
-        {
-            syslog(LOG_ERR, "Failed to accept client with errno %d\n", errno);
-            close(server_fd);
-            exit(EXIT_FAILURE);
-        }
-        // client is accepted
-        syslog(LOG_INFO, "Accepted connection from %s", inet_ntoa(clientAddr.sin_addr));
-
-        node_t *newNode = malloc(sizeof(node_t));
-        if (newNode == NULL)
-        {
-            syslog(LOG_ERR, "Failed to malloc new node\n");
-            close(server_fd);
-            exit(EXIT_FAILURE);
+        if (client->clientSocket < 0) {
+            free(client);
+            continue;
         }
 
-        /* Fill the node's client struct (copy values). Use the same FILE* and filename. */
-        newNode->clientStruct.clientSocket = clientSocket;
-        newNode->clientStruct.filename = filename;
-        newNode->clientStruct.clientAddr = clientAddr;
-        newNode->clientStruct.isFinished = 0;
-
-        TAILQ_INSERT_TAIL(&head, newNode, nodes);
-
-        if (pthread_create(&newNode->nodeThread, NULL, reader_fnc, &newNode->clientStruct) != 0)
-        {
-            syslog(LOG_PERROR, "Failed to create thread");
-            close(server_fd);
-            exit(EXIT_FAILURE);
-        }
-
-    } /*while (!exitFlag);*/
-
-#if !USE_AESD_CHAR_DEVICE
-    // Join all still open threads
-    pthread_join(timestampNode->nodeThread, NULL);
-#endif
-
-    node_t *node, *tmp;
-
-    for (node = TAILQ_FIRST(&head); node != NULL; node = tmp)
-    {
-        tmp = TAILQ_NEXT(node, nodes);
-
-        // Now it's safe to remove node
-        if (node->clientStruct.isFinished)
-        {
-            pthread_join(node->nodeThread, NULL);
-            printf("Removed Client %d\n", node->clientStruct.clientSocket);
-            TAILQ_REMOVE(&head, node, nodes);
-            free(node);
-        }
-        else
-        {
-            syslog(LOG_INFO, "Client %d is not yet finished yet", node->clientStruct.clientSocket);
-        }
+        pthread_t tid;
+        pthread_create(&tid, NULL, client_thread, client);
+        pthread_detach(tid);
     }
 
-#if !USE_AESD_CHAR_DEVICE
-    if (remove(filename) == 0)
-    {
-        syslog(LOG_INFO, "File deleted sucessfully\n");
-    }
-    else
-    {
-        syslog(LOG_ERR, "Failed removing the file");
-    }
-#endif
     close(server_fd);
     closelog();
     return 0;

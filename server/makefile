@@ -1,5 +1,5 @@
 CC ?= $(CROSS_COMPILE) gcc
-CFLAGS ?=-Wall -Werror -O0
+CFLAGS ?=-Wall  -O0
 LDFLAGS ?= 
 ARGS ?= -I../aesd-char-driver
 all: aesdsocket
